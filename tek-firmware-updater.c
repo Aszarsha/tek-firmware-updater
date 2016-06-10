@@ -1,19 +1,19 @@
 #define COMPILE_AND_EXEC /*
 printf "Compiling %s into %s\n" "${0}" "${0%.*}"
-$CC -Wall -pedantic -std=c99 -o "${0%.*}" "${0}"
+$CC -Wall -pedantic -std=c11 -o "${0%.*}" "${0}"
 [ $? -ne 0 ] && exit
 printf "Running %s" "${0%.*}\n"
 valgrind --tool=memcheck --leak-check=full "./${0%.*}" $*
 exit
 */
-#include <assert.h>
 #include <errno.h>
 #include <stdio.h>
+#include <assert.h>
 #include <stdlib.h>
-#include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
 #include <stdarg.h>
+#include <stdbool.h>
 
 typedef uint8_t  ui8;
 typedef uint16_t ui16;
@@ -23,15 +23,13 @@ char * load_ihex_buffer( FILE * ihex_file, ui8 * buffer, size_t * buffer_sz );
 char * upload_buffer_to_dev( ui8 * buffer, size_t buffer_sz );
 
 // Megawin MG84FL54B doc says 16k of onboard ISP/IAP flash memory
+// Otherwise, 8bit mode ihex files support addressing up to 65536
 #define IHEX_BUFFER_MAX_SZ 16384
 
 int main( int argc, char *argv[] ) {
 		int exit_code = EXIT_FAILURE;
 		if ( argc != 2 ) {
-				printf( "Usage: %s <firmware file>\n"
-				        "\tFirmware must be in Intel hex (ihex) format\n"
-				      , argv[0]
-				      );
+				printf( "Usage: %s <firmware file>\n\tFile must be in Intel 8bit hex format\n", argv[0] );
 				goto exit_program;
 		}
 
@@ -57,7 +55,7 @@ int main( int argc, char *argv[] ) {
 		}
 
 		for ( size_t i = 0; i < ihex_buffer_sz; ++i ) {
-				printf( "%zx", ihex_buffer[i] );
+				printf( "%x", (int)ihex_buffer[i] );
 		}
 		printf( "\n" );
 
@@ -81,13 +79,15 @@ int main( int argc, char *argv[] ) {
 
 #define MAX_ERROR_STRING_SZ 256
 char * format_error( char * format, ... ) {
-		static char error_buffer[MAX_ERROR_STRING_SZ] = {0};
+		static /*thread_local*/ char error_buffer[MAX_ERROR_STRING_SZ] = {0};
 		va_list args;
 		va_start( args, format );
 		vsnprintf( error_buffer, MAX_ERROR_STRING_SZ, format, args );
 		va_end( args );
 		return error_buffer;
 }
+
+//=== Intel HEX format loading ===//
 
 // According to doc, data field contains 255 (0xFF) max bytes
 // Line is 1 ':', 2 bytes count, 4 address, 2 record, 255 max data, 2 checksum
@@ -219,15 +219,16 @@ char * load_ihex_buffer( FILE * ihex_file, ui8 * buffer, size_t * buffer_sz ) {
 									buffer[record.addr+i] = record.data[i];
 							}
 						} break;
-					case 1:
-						last_record_read = true;
-						break;
+					case 1: {
+							last_record_read = true;
+						} break;
 					case 2:
 					case 3:
 					case 4:
 					case 5:
-						return "TODO, absent from TEK hex files";
-						// return error, we don't want to upload invalid firmware
+						return format_error( "Only support 8bit ihex (line %zu)"
+						                   , line_number
+						                   );
 					default:
 						return format_error( "Invalid record type (line %zu)"
 						                   , line_number
@@ -237,6 +238,8 @@ char * load_ihex_buffer( FILE * ihex_file, ui8 * buffer, size_t * buffer_sz ) {
 		*buffer_sz = highest_addr;
 		return NULL;
 }
+
+//=== USB Device Firmware Update upload ===//
 
 char * upload_buffer_to_dev( ui8 * buffer, size_t buffer_sz ) {
 
