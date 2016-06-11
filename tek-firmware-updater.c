@@ -49,6 +49,11 @@ int main( int argc, char *argv[] ) {
 				goto unwind_file;
 		}
 
+		for ( size_t i = 0; i < ihex_buffer_sz; ++i ) {
+				printf( "%x", (int)ihex_buffer[i] );
+		}
+		printf( "\n" );
+
 		char const * upload_error = upload_buffer_to_dev( ihex_buffer, ihex_buffer_sz );
 		if ( upload_error ) {
 				fprintf( stderr, "Unable to upload buffer to device: %s\n", upload_error );
@@ -84,14 +89,12 @@ typedef struct {
 		ui8    checksum;
 } ihex_record;
 
-static char const * read_record_from_line( char * line, ihex_record * record, ui8 * check_sum ) {
+static char const * read_record_from_line( char const * line, ihex_record * record, ui8 * check_sum ) {
 		assert( line && record && check_sum );
 
 		size_t length = strlen( line );
-		// remove carriage return and new line if present
-		while ( length > 0 && (line[length-1] == '\n' || line[length-1] == '\r') ) {
-				line[length-1] = 0;   length -= 1;
-		}
+		// Do not count carriage return and new line in the ihex line length
+		while ( length > 0 && (line[length-1] == '\n' || line[length-1] == '\r') ) {   length -= 1;   }
 
 		// check that line contains all records and start code BUT data
 		// 11 characters total
