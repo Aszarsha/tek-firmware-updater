@@ -18,9 +18,9 @@ exit
 typedef uint8_t  ui8;
 typedef uint16_t ui16;
 
-char * load_ihex_buffer( FILE * ihex_file, ui8 * buffer, size_t * buffer_sz );
+char const * load_ihex_buffer( FILE * ihex_file, ui8 * buffer, size_t * buffer_sz );
 
-char * upload_buffer_to_dev( ui8 * buffer, size_t buffer_sz );
+char const * upload_buffer_to_dev( ui8 * buffer, size_t buffer_sz );
 
 // Megawin MG84FL54B doc says 16k of onboard ISP/IAP flash memory
 // Otherwise, 8bit mode ihex files support addressing up to 65536
@@ -43,13 +43,13 @@ int main( int argc, char *argv[] ) {
 		// we want to exit early and not change the controller state
 		size_t ihex_buffer_sz = IHEX_BUFFER_MAX_SZ;
 		ui8 ihex_buffer[IHEX_BUFFER_MAX_SZ];
-		char * load_error = load_ihex_buffer( ihex_file, ihex_buffer, &ihex_buffer_sz );
+		char const * load_error = load_ihex_buffer( ihex_file, ihex_buffer, &ihex_buffer_sz );
 		if ( load_error ) {
 				fprintf( stderr, "Unable to load hex file: %s\n", load_error );
 				goto unwind_file;
 		}
 
-		char * upload_error = upload_buffer_to_dev( ihex_buffer, ihex_buffer_sz );
+		char const * upload_error = upload_buffer_to_dev( ihex_buffer, ihex_buffer_sz );
 		if ( upload_error ) {
 				fprintf( stderr, "Unable to upload buffer to device: %s\n", upload_error );
 				goto unwind_dev;
@@ -65,8 +65,8 @@ int main( int argc, char *argv[] ) {
 }
 
 #define MAX_ERROR_STRING_SZ 256
-char * format_error( char * format, ... ) {
-		static /*thread_local*/ char error_buffer[MAX_ERROR_STRING_SZ] = {0};
+static char const * format_error( char const * format, ... ) {
+		static /*thread_local*/ char error_buffer[MAX_ERROR_STRING_SZ];
 		va_list args;
 		va_start( args, format );
 		vsnprintf( error_buffer, MAX_ERROR_STRING_SZ, format, args );
@@ -84,7 +84,7 @@ typedef struct {
 		ui8    checksum;
 } ihex_record;
 
-static char * read_record_from_line( char * line, ihex_record * record, ui8 * check_sum ) {
+static char const * read_record_from_line( char * line, ihex_record * record, ui8 * check_sum ) {
 		assert( line && record && check_sum );
 
 		size_t length = strlen( line );
@@ -127,7 +127,7 @@ static char * read_record_from_line( char * line, ihex_record * record, ui8 * ch
 // plus two bytes for new line (/r/n) and one for null-termination
 #define IHEX_LINE_MAX_SZ 521
 
-char * load_ihex_buffer( FILE * ihex_file, ui8 * buffer, size_t * buffer_sz ) {
+char const * load_ihex_buffer( FILE * ihex_file, ui8 * buffer, size_t * buffer_sz ) {
 		assert( ihex_file && buffer && buffer_sz && *buffer_sz );
 
 		size_t line_number = 0;
@@ -137,8 +137,7 @@ char * load_ihex_buffer( FILE * ihex_file, ui8 * buffer, size_t * buffer_sz ) {
 				line_number += 1;
 
 				char line_buffer[IHEX_LINE_MAX_SZ];
-				char * line = fgets( line_buffer, IHEX_LINE_MAX_SZ, ihex_file );
-				if ( !line ) {
+				if ( !fgets( line_buffer, IHEX_LINE_MAX_SZ, ihex_file ) ) {
 						if ( feof( ihex_file ) ) {
 								if ( last_record_read ) {   break;   } // we're fine! :)
 								return format_error( "Unexpected end-of-file (line %zu)", line_number );
@@ -152,7 +151,7 @@ char * load_ihex_buffer( FILE * ihex_file, ui8 * buffer, size_t * buffer_sz ) {
 
 				ihex_record record;
 				ui8 check_sum;
-				char * error = read_record_from_line( line, &record, &check_sum );
+				char const * error = read_record_from_line( line_buffer, &record, &check_sum );
 				if ( error ) {   return error;   }
 
 				if ( (ui8)(check_sum + record.checksum) != 0 ) {
@@ -190,7 +189,7 @@ char * load_ihex_buffer( FILE * ihex_file, ui8 * buffer, size_t * buffer_sz ) {
 
 //=== USB Device Firmware Update upload ===//
 
-char * upload_buffer_to_dev( ui8 * buffer, size_t buffer_sz ) {
+char const * upload_buffer_to_dev( ui8 * buffer, size_t buffer_sz ) {
 
 		return NULL;
 }
