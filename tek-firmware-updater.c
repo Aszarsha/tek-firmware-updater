@@ -1,9 +1,9 @@
 #define COMPILE_AND_EXEC /*
 printf "Compiling %s into %s\n" "${0}" "${0%.*}"
-$CC -Wall -pedantic -std=c11 -o "${0%.*}" "${0}"
+$CC -ggdb -Wall -pedantic -std=c11 -lusb-1.0 -o "${0%.*}" "${0}"
 [ $? -ne 0 ] && exit
 printf "Running %s" "${0%.*}\n"
-valgrind --tool=memcheck --leak-check=full "./${0%.*}" $*
+valgrind --tool=memcheck --leak-check=full --show-leak-kinds=all "./${0%.*}" $*
 exit
 */
 #include <errno.h>
@@ -15,59 +15,30 @@ exit
 #include <stdarg.h>
 #include <stdbool.h>
 
+#include <libusb-1.0/libusb.h>
+
 typedef uint8_t  ui8;
 typedef uint16_t ui16;
 
-char const * load_ihex_buffer( FILE * ihex_file, ui8 * buffer, size_t * buffer_sz );
+#define TECK_VENDOR_ID                     0x0E6A
+#define TECK_PRODUCT_ID_NORMAL_STATE       0x030C
+#define TECK_PRODUCT_ID_PROGRAMMABLE_STATE 0x030C
 
-char const * upload_buffer_to_dev( ui8 * buffer, size_t buffer_sz );
+enum tek_device_state_t {
+		TEK_NORMAL_STATE       = TECK_PRODUCT_ID_NORMAL_STATE,
+		TEK_PROGRAMMABLE_STATE = TECK_PRODUCT_ID_PROGRAMMABLE_STATE
+};
 
 // Megawin MG84FL54B doc says 16k of onboard ISP/IAP flash memory
 // Otherwise, 8bit mode ihex files support addressing up to 65536
 #define IHEX_BUFFER_MAX_SZ 16384
 
-int main( int argc, char *argv[] ) {
-		int exit_code = EXIT_FAILURE;
-		if ( argc != 2 ) {
-				printf( "Usage: %s <firmware file>\n\tFile must be in Intel 8bit hex format\n", argv[0] );
-				goto exit_program;
-		}
+char const * load_ihex_buffer_from_file( char const * filename, ui8 * buffer, size_t * buffer_sz );
 
-		FILE * ihex_file = fopen( argv[1], "r" );
-		if ( !ihex_file ) {
-				fprintf( stderr, "Unable to open ihex file \"%s\"\n", argv[1] );
-				goto exit_program;
-		}
-
-		// First load the ihex file, if there is a problem
-		// we want to exit early and not change the controller state
-		size_t ihex_buffer_sz = IHEX_BUFFER_MAX_SZ;
-		ui8 ihex_buffer[IHEX_BUFFER_MAX_SZ];
-		char const * load_error = load_ihex_buffer( ihex_file, ihex_buffer, &ihex_buffer_sz );
-		if ( load_error ) {
-				fprintf( stderr, "Unable to load hex file: %s\n", load_error );
-				goto unwind_file;
-		}
-
-		for ( size_t i = 0; i < ihex_buffer_sz; ++i ) {
-				printf( "%x", (int)ihex_buffer[i] );
-		}
-		printf( "\n" );
-
-		char const * upload_error = upload_buffer_to_dev( ihex_buffer, ihex_buffer_sz );
-		if ( upload_error ) {
-				fprintf( stderr, "Unable to upload buffer to device: %s\n", upload_error );
-				goto unwind_dev;
-		}
-
-		exit_code = EXIT_SUCCESS;
-	unwind_dev:
-
-	unwind_file:
-		fclose( ihex_file );
-	exit_program:
-		return exit_code;
-}
+char const * get_handle_to_tek_device( libusb_device_handle* * usb_device_handle
+                                     , enum tek_device_state_t * tek_device_state
+                                     );
+char const * upload_buffer_to_dev( ui8 * buffer, size_t buffer_sz, libusb_device_handle * usb_device_handle );
 
 #define MAX_ERROR_STRING_SZ 256
 static char const * format_error( char const * format, ... ) {
@@ -77,6 +48,98 @@ static char const * format_error( char const * format, ... ) {
 		vsnprintf( error_buffer, MAX_ERROR_STRING_SZ, format, args );
 		va_end( args );
 		return error_buffer;
+}
+
+int main( int argc, char *argv[] ) {
+		char const * opt_error = NULL;
+
+		if ( argc != 2 ) {
+				opt_error = format_error( "Usage: %s <firmware file>\n"
+				                          "\tFile must be in Intel 8bit hex format"
+				                        , argv[0]
+				                        );
+				goto program_exit;
+		}
+
+		printf( "Loading ihex firmware file.\n" );
+
+		// First load the ihex file, if there is a problem
+		// we want to exit early and not change the controller state
+		size_t ihex_buffer_sz = IHEX_BUFFER_MAX_SZ;
+		ui8 ihex_buffer[IHEX_BUFFER_MAX_SZ];
+		char const * call_error = load_ihex_buffer_from_file( argv[1], ihex_buffer, &ihex_buffer_sz );
+		if ( call_error ) {
+				opt_error = format_error( "Unable to load hex buffer from file: %s", call_error );
+				goto program_exit;
+		}
+
+		for ( size_t i = 0; i < ihex_buffer_sz; ++i ) {
+				printf( "%x", (int)ihex_buffer[i] );
+		}
+		printf( "\n" );
+
+		printf( "Searching for connected TEK\n" );
+
+		int status = libusb_init( NULL );
+		if ( status < 0 ) {
+				opt_error = format_error( "Unable to initialize libusb: %s (%s)"
+				                        , libusb_error_name( status ), libusb_strerror( status )
+				                        );
+				goto program_exit;
+		}
+
+		libusb_device_handle * tek_device_handle;
+		enum tek_device_state_t tek_device_state = TEK_NORMAL_STATE ;
+		call_error = get_handle_to_tek_device( &tek_device_handle, &tek_device_state );
+		if ( call_error ) {
+				opt_error = format_error( "Unable to connect to a TEK: %s", call_error );
+				goto unwind_usb;
+		}
+		if ( tek_device_state != TEK_NORMAL_STATE ) {
+				opt_error = "Found TEK, but is not in normal mode";
+				goto unwind_tek_device_handle;
+		}
+
+		printf( "TEK found, switching to programmable mode.\n" );
+
+		// TODO Actually switch
+
+		printf( "Command sent, trying to reconnect.\n" );
+
+		libusb_close( tek_device_handle );
+		call_error = get_handle_to_tek_device( &tek_device_handle, &tek_device_state );
+		if ( call_error ) {
+				opt_error = format_error( "Unable to reconnect to the TEK: %s", call_error );
+				goto unwind_usb;
+		}
+		if ( tek_device_state != TEK_PROGRAMMABLE_STATE ) {
+				opt_error = "Found TEK, but is not in programmable mode";
+				goto unwind_tek_device_handle;
+		}
+
+		printf( "TEK successfully switched to programmable mode.\n" );
+		printf( "Sending new firmware to device.\n" );
+
+		call_error = upload_buffer_to_dev( ihex_buffer, ihex_buffer_sz, tek_device_handle );
+		if ( call_error ) {
+				opt_error = format_error( "Unable to upload buffer to device: %s", call_error );
+				goto unwind_tek_device_handle;
+		}
+
+		printf( "Firmware sent, switching back to normal mode.\n" );
+
+		// TODO Actually switch
+
+	unwind_tek_device_handle:
+		libusb_close( tek_device_handle );
+	unwind_usb:
+		libusb_exit( NULL );
+	program_exit:
+		if ( opt_error ) {
+				fprintf( stderr, "Error: %s\n", opt_error );
+				return EXIT_FAILURE;
+		}
+		return EXIT_SUCCESS;
 }
 
 //=== Intel HEX format loading ===//
@@ -130,7 +193,7 @@ static char const * read_record_from_line( char const * line, ihex_record * reco
 // plus two bytes for new line (/r/n) and one for null-termination
 #define IHEX_LINE_MAX_SZ 521
 
-char const * load_ihex_buffer( FILE * ihex_file, ui8 * buffer, size_t * buffer_sz ) {
+static char const * load_ihex_buffer( FILE * ihex_file, ui8 * buffer, size_t * buffer_sz ) {
 		assert( ihex_file && buffer && buffer_sz && *buffer_sz );
 
 		size_t line_number = 0;
@@ -190,9 +253,87 @@ char const * load_ihex_buffer( FILE * ihex_file, ui8 * buffer, size_t * buffer_s
 		return NULL;
 }
 
+char const * load_ihex_buffer_from_file( char const * filename, ui8 * ihex_buffer, size_t * ihex_buffer_sz ) {
+		char const * opt_error = NULL;
+
+		FILE * ihex_file = fopen( filename, "r" );
+		if ( !ihex_file ) {
+				opt_error = format_error( "Unable to open ihex file \"%s\"", filename );
+				goto function_exit;
+		}
+
+		char const * call_error = load_ihex_buffer( ihex_file, ihex_buffer, ihex_buffer_sz );
+		if ( call_error ) {
+				opt_error = format_error(  "Unable to load hex file: %s", call_error );
+				goto unwind_file;
+		}
+
+	unwind_file:
+		fclose( ihex_file );
+	function_exit:
+		return opt_error;
+}
+
 //=== USB Device Firmware Update upload ===//
 
-char const * upload_buffer_to_dev( ui8 * buffer, size_t buffer_sz ) {
+char const * get_handle_to_tek_device( libusb_device_handle* * tek_device_handle
+                                     , enum tek_device_state_t * tek_device_state
+                                     ) {
+		char const * opt_error = NULL;
+
+		libusb_device* * usb_devices;
+		int status = libusb_get_device_list( NULL, &usb_devices );
+		if ( status < 0 ) {
+				opt_error = format_error( "Unable to enumerate usb devices: %s (%s)"
+				                        , libusb_strerror( status ), libusb_error_name( status )
+				                        );
+				goto function_exit;
+		}
+
+		libusb_device * tek_device = NULL;
+		for ( libusb_device* * it = usb_devices; *it; ++it ) {
+				struct libusb_device_descriptor usb_device_descriptor;
+				status = libusb_get_device_descriptor( *it, &usb_device_descriptor );
+				if ( status < 0 ) {
+						opt_error = format_error( "Unable to usb get device descriptor: %s (%s)"
+						                        , libusb_strerror( status ), libusb_error_name( status )
+						                        );
+						goto unwind_usb_devices_list;
+				}
+
+				if ( usb_device_descriptor.idVendor == TECK_VENDOR_ID ) {
+						if ( usb_device_descriptor.idProduct == TECK_PRODUCT_ID_NORMAL_STATE
+						  || usb_device_descriptor.idProduct == TECK_PRODUCT_ID_PROGRAMMABLE_STATE
+						   ) {
+								if ( tek_device ) {
+										opt_error = "Multiple TEK keyboards found; make sure to connect only one";
+										goto unwind_usb_devices_list;
+								}
+								tek_device = *it;
+								*tek_device_state = usb_device_descriptor.idProduct;
+						}
+				}
+		}
+
+		if ( !tek_device ) {
+				opt_error = "Unable to find a TEK keyboard device connected";
+		} else {
+				status = libusb_open( tek_device, tek_device_handle );
+				if ( status < 0 ) {
+						opt_error = format_error( "Unable to get a handle on the TEK device: %s (%s)"
+						                        , libusb_strerror( status ), libusb_error_name( status )
+						                        );
+				}
+		}
+
+	unwind_usb_devices_list:
+		libusb_free_device_list( usb_devices, true );
+	function_exit:
+		return opt_error;
+}
+
+char const * upload_buffer_to_dev( ui8 * buffer, size_t buffer_sz, libusb_device_handle * usb_device_handle ) {
+		// TODO Actually send the buffer
 
 		return NULL;
 }
